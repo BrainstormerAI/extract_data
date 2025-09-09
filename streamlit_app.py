@@ -8,17 +8,21 @@ from urllib.parse import quote, urljoin, urlparse
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+from duckduckgo_search import DDGS
+from io import BytesIO
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class GoogleEmployeeExtractor:
-    def __init__(self):
+class EmployeeDataExtractor:
+    def __init__(self, google_api_key=None, google_cse_id=None):
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
+        self.google_api_key = google_api_key
+        self.google_cse_id = google_cse_id
         
     def extract_emails_from_text(self, text):
         """Extract email addresses from text"""
@@ -151,8 +155,67 @@ class GoogleEmployeeExtractor:
         
         return "10-50"  # Default
 
-    def search_google_companies(self, industry, city, country, limit=10):
-        """Search for companies using Google Custom Search API alternative"""
+    def search_with_google_api(self, query, limit=10):
+        """Search using Google Custom Search API"""
+        try:
+            url = "https://www.googleapis.com/customsearch/v1"
+            params = {
+                'key': self.google_api_key,
+                'cx': self.google_cse_id,
+                'q': query,
+                'num': min(limit, 10)  # Google API max is 10 per request
+            }
+            
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            
+            data = response.json()
+            results = []
+            
+            if 'items' in data:
+                for item in data['items']:
+                    title = item.get('title', '')
+                    url = item.get('link', '')
+                    
+                    if url and title:
+                        results.append({
+                            'name': title,
+                            'url': url,
+                            'source': 'Google API'
+                        })
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Google API search failed: {e}")
+            return []
+
+    def search_with_duckduckgo(self, query, limit=10):
+        """Search using DuckDuckGo API"""
+        try:
+            with DDGS() as ddgs:
+                results = []
+                search_results = ddgs.text(query, max_results=limit)
+                
+                for result in search_results:
+                    title = result.get('title', '')
+                    url = result.get('href', '')
+                    
+                    if url and title:
+                        results.append({
+                            'name': title,
+                            'url': url,
+                            'source': 'DuckDuckGo'
+                        })
+                
+                return results
+                
+        except Exception as e:
+            logger.error(f"DuckDuckGo search failed: {e}")
+            return []
+
+    def search_companies(self, industry, city, country, limit=10):
+        """Search for companies with fallback logic"""
         search_queries = [
             f"{industry} companies in {city} {country} contact email phone",
             f"{industry} firms {city} {country} CTO CEO director",
@@ -160,50 +223,51 @@ class GoogleEmployeeExtractor:
             f"{industry} businesses {city} {country} leadership contact"
         ]
         
-        companies = []
+        all_companies = []
+        search_source = "DuckDuckGo"  # Default
         
         for query in search_queries:
-            try:
-                # Use DuckDuckGo as it's more scraping-friendly
-                search_url = f"https://duckduckgo.com/html/?q={quote(query)}"
-                
-                response = self.session.get(search_url, timeout=15)
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.content, 'html.parser')
-                    
-                    # Extract search results
-                    results = soup.find_all('a', {'class': 'result__a'})
-                    
-                    for result in results[:5]:  # Top 5 results per query
-                        try:
-                            url = result.get('href')
-                            title = result.get_text().strip()
-                            
-                            if url and title and not any(skip in url.lower() for skip in ['linkedin.com', 'facebook.com', 'twitter.com', 'youtube.com']):
-                                companies.append({
-                                    'name': title,
-                                    'url': url,
-                                    'source': 'Search'
-                                })
-                        except Exception as e:
-                            continue
-                
-                time.sleep(2)  # Rate limiting
-                
-            except Exception as e:
-                logger.error(f"Error searching for query '{query}': {e}")
-                continue
+            companies_from_query = []
+            
+            # Try Google API first if credentials are provided
+            if self.google_api_key and self.google_cse_id:
+                try:
+                    companies_from_query = self.search_with_google_api(query, limit // len(search_queries))
+                    if companies_from_query:
+                        search_source = "Google API"
+                        logger.info(f"Using Google API for query: {query}")
+                except Exception as e:
+                    logger.error(f"Google API failed, falling back to DuckDuckGo: {e}")
+            
+            # Fallback to DuckDuckGo if Google fails or not configured
+            if not companies_from_query:
+                companies_from_query = self.search_with_duckduckgo(query, limit // len(search_queries))
+                search_source = "DuckDuckGo"
+                logger.info(f"Using DuckDuckGo for query: {query}")
+            
+            all_companies.extend(companies_from_query)
+            time.sleep(1)  # Rate limiting
+        
+        # Filter out social media URLs
+        social_media_domains = ['linkedin.com', 'facebook.com', 'twitter.com', 'youtube.com', 'instagram.com']
+        filtered_companies = []
+        
+        for company in all_companies:
+            url_lower = company['url'].lower()
+            if not any(domain in url_lower for domain in social_media_domains):
+                filtered_companies.append(company)
         
         # Remove duplicates based on URL
         unique_companies = []
         seen_urls = set()
         
-        for company in companies:
+        for company in filtered_companies:
             if company['url'] not in seen_urls:
                 unique_companies.append(company)
                 seen_urls.add(company['url'])
         
-        return unique_companies[:limit]
+        logger.info(f"Found {len(unique_companies)} unique companies using {search_source}")
+        return unique_companies[:limit], search_source
 
     def scrape_company_website(self, company_url, company_name, job_role):
         """Scrape individual company website for employee information"""
@@ -322,12 +386,12 @@ class GoogleEmployeeExtractor:
             logger.info(f"Starting extraction for {job_role} in {industry} companies in {city}, {country}")
             
             # Step 1: Search for companies
-            companies = self.search_google_companies(industry, city, country, limit * 2)
+            companies, search_source = self.search_companies(industry, city, country, limit * 2)
             
             if not companies:
-                return []
+                return [], search_source
             
-            logger.info(f"Found {len(companies)} companies to scrape")
+            logger.info(f"Found {len(companies)} companies to scrape using {search_source}")
             
             # Step 2: Scrape each company website
             all_employees = []
@@ -370,11 +434,11 @@ class GoogleEmployeeExtractor:
                     seen_combinations.add(key)
             
             logger.info(f"Successfully extracted {len(unique_employees)} unique employee records")
-            return unique_employees[:limit]
+            return unique_employees[:limit], search_source
             
         except Exception as e:
             logger.error(f"Error in extract_employee_data: {e}")
-            return []
+            return [], "Error"
 
 def main():
     st.set_page_config(
@@ -406,6 +470,13 @@ def main():
         border-radius: 10px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
+    .status-info {
+        background-color: #e3f2fd;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 4px solid #2196f3;
+        margin: 1rem 0;
+    }
     </style>
     """, unsafe_allow_html=True)
     
@@ -413,9 +484,32 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>🔍 Employee Data Extractor</h1>
-        <p>Extract real employee data from Google search results</p>
+        <p>Extract real employee data from Google and DuckDuckGo search results</p>
     </div>
     """, unsafe_allow_html=True)
+    
+    # Advanced Settings
+    with st.expander("⚙️ Advanced Settings"):
+        st.markdown("**Google Custom Search API (Optional)**")
+        st.markdown("Provide your Google API credentials for potentially better search results. If not provided, DuckDuckGo will be used.")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            google_api_key = st.text_input(
+                "Google API Key",
+                type="password",
+                help="Get your API key from Google Cloud Console"
+            )
+        with col2:
+            google_cse_id = st.text_input(
+                "Custom Search Engine ID",
+                help="Create a CSE at https://cse.google.com/"
+            )
+        
+        if google_api_key and google_cse_id:
+            st.success("✅ Google API credentials provided - will use Google Custom Search")
+        else:
+            st.info("ℹ️ No Google API credentials - will use DuckDuckGo (free)")
     
     # Search parameters
     st.markdown('<div class="search-container">', unsafe_allow_html=True)
@@ -470,17 +564,36 @@ def main():
         status_text = st.empty()
         
         try:
-            # Initialize extractor
-            extractor = GoogleEmployeeExtractor()
+            # Initialize extractor with API credentials
+            extractor = EmployeeDataExtractor(
+                google_api_key=google_api_key if google_api_key else None,
+                google_cse_id=google_cse_id if google_cse_id else None
+            )
             
             status_text.text("🔍 Searching for companies...")
             progress_bar.progress(25)
             
             # Extract data
             with st.spinner("Extracting employee data from websites..."):
-                results = extractor.extract_employee_data(industry, job_role, city, country, limit)
+                results, search_source = extractor.extract_employee_data(industry, job_role, city, country, limit)
             
             progress_bar.progress(100)
+            
+            # Show search source status
+            if search_source == "Google API":
+                st.markdown(f"""
+                <div class="status-info">
+                    <strong>🔍 Search Source:</strong> Google Custom Search API<br>
+                    <strong>✅ Status:</strong> Using your provided API credentials
+                </div>
+                """, unsafe_allow_html=True)
+            elif search_source == "DuckDuckGo":
+                st.markdown(f"""
+                <div class="status-info">
+                    <strong>🔍 Search Source:</strong> DuckDuckGo API<br>
+                    <strong>ℹ️ Status:</strong> Free search (no API key required)
+                </div>
+                """, unsafe_allow_html=True)
             
             if results:
                 status_text.success(f"✅ Successfully extracted {len(results)} employee records!")
@@ -523,7 +636,6 @@ def main():
                 
                 with col2:
                     # Excel download
-                    from io import BytesIO
                     excel_buffer = BytesIO()
                     df.to_excel(excel_buffer, index=False, engine='openpyxl')
                     excel_data = excel_buffer.getvalue()
@@ -576,6 +688,7 @@ def main():
                 - Searching in major cities
                 - Trying different job roles
                 - Increasing the number of results
+                - Providing Google API credentials for better search results
                 """)
         
         except Exception as e:
@@ -592,19 +705,59 @@ def main():
     # Information section
     with st.expander("ℹ️ How it works"):
         st.markdown("""
-        **This tool extracts real employee data from Google search results:**
+        **This tool extracts real employee data from search results:**
         
+        **🔍 Search Sources:**
+        - **DuckDuckGo API**: Free, reliable search (default)
+        - **Google Custom Search API**: Premium search with your API key (optional)
+        
+        **📊 Extraction Process:**
         1. **Search**: Finds companies in your specified industry and location
-        2. **Scrape**: Extracts employee information from company websites
-        3. **Parse**: Identifies names, emails, phones, and addresses
-        4. **Filter**: Removes duplicates and validates data
-        5. **Export**: Provides results in CSV, Excel, and JSON formats
+        2. **Filter**: Removes social media URLs and duplicates
+        3. **Scrape**: Extracts employee information from company websites
+        4. **Parse**: Identifies names, emails, phones, and addresses
+        5. **Validate**: Removes duplicates and validates data
+        6. **Export**: Provides results in CSV, Excel, and JSON formats
         
-        **Data Sources:**
+        **🎯 Data Sources:**
         - Company websites and about pages
         - Team and leadership sections
         - Contact pages and directories
         - Publicly available business information
+        
+        **🔧 API Setup (Optional):**
+        - Get Google API key from [Google Cloud Console](https://console.cloud.google.com/)
+        - Create Custom Search Engine at [Google CSE](https://cse.google.com/)
+        - Enable Custom Search API in your Google Cloud project
+        """)
+    
+    with st.expander("🔑 Google API Setup Guide"):
+        st.markdown("""
+        **To use Google Custom Search API (optional but recommended):**
+        
+        **Step 1: Get API Key**
+        1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+        2. Create a new project or select existing one
+        3. Enable "Custom Search API"
+        4. Go to "Credentials" → "Create Credentials" → "API Key"
+        5. Copy your API key
+        
+        **Step 2: Create Custom Search Engine**
+        1. Go to [Google Custom Search](https://cse.google.com/)
+        2. Click "Add" to create new search engine
+        3. Enter "*" as the site to search (for web-wide search)
+        4. Create the search engine
+        5. Copy the "Search engine ID"
+        
+        **Step 3: Configure**
+        1. Paste API Key and Search Engine ID in Advanced Settings above
+        2. The app will automatically use Google API for better results
+        
+        **Benefits of Google API:**
+        - More reliable search results
+        - Better company discovery
+        - Higher success rate
+        - No rate limiting issues
         """)
 
 if __name__ == "__main__":
