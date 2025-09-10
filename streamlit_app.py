@@ -8,16 +8,28 @@ from urllib.parse import quote, urljoin, urlparse
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class GoogleEmployeeExtractor:
+class EmployeeDataExtractor:
     def __init__(self):
         self.session = requests.Session()
+        # Rotate user agents to avoid blocking
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        ]
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': random.choice(user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
         })
 
     def extract_emails_from_text(self, text):
@@ -26,14 +38,14 @@ class GoogleEmployeeExtractor:
         emails = re.findall(email_pattern, text, re.IGNORECASE)
 
         # Filter out common noise emails
-        noise_patterns = ['example.com', 'test.com', 'sample.com', 'placeholder.com', 'noreply', 'no-reply']
+        noise_patterns = ['example.com', 'test.com', 'sample.com', 'placeholder.com', 'noreply', 'no-reply', 'support@', 'info@']
         filtered_emails = []
 
         for email in emails:
-            if not any(noise in email.lower() for noise in noise_patterns):
+            if not any(noise in email.lower() for noise in noise_patterns) and len(email) > 5:
                 filtered_emails.append(email)
 
-        return list(set(filtered_emails))[:5]  # Return top 5 unique emails
+        return list(set(filtered_emails))[:5]
 
     def extract_phone_numbers(self, text):
         """Extract phone numbers from text"""
@@ -65,12 +77,13 @@ class GoogleEmployeeExtractor:
     def extract_names_from_text(self, text):
         """Extract potential employee names from text"""
         name_patterns = [
-            r'(?:CEO|CTO|President|Director|Manager|VP|Vice President|Chief|Head|Lead)[:\s]+([A-Z][a-z]+\s+[A-Z][a-z]+)',
-            r'([A-Z][a-z]+\s+[A-Z][a-z]+)[,\s]+(?:CEO|CTO|President|Director|Manager|VP|Vice President|Chief|Head|Lead)',
+            r'(?:CEO|CTO|President|Director|Manager|VP|Vice President|Chief|Head|Lead|Founder|Co-Founder)[:\s-]+([A-Z][a-z]+\s+[A-Z][a-z]+)',
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+)[,\s-]+(?:CEO|CTO|President|Director|Manager|VP|Vice President|Chief|Head|Lead|Founder|Co-Founder)',
             r'Contact[:\s]+([A-Z][a-z]+\s+[A-Z][a-z]+)',
-            r'([A-Z][a-z]+\s+[A-Z][a-z]+)[,\s]+(?:is|serves as)',
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+)[,\s]+(?:is|serves as|works as)',
             r'Mr\.?\s+([A-Z][a-z]+\s+[A-Z][a-z]+)',
             r'Ms\.?\s+([A-Z][a-z]+\s+[A-Z][a-z]+)',
+            r'Dr\.?\s+([A-Z][a-z]+\s+[A-Z][a-z]+)',
         ]
 
         names = []
@@ -79,22 +92,32 @@ class GoogleEmployeeExtractor:
             names.extend(matches)
 
         # Filter out noise
-        noise_words = ['Contact Us', 'About Us', 'Terms Service', 'Privacy Policy', 'Get Started', 'Learn More']
-        filtered_names = [name for name in names if name not in noise_words and len(name.split()) == 2]
+        noise_words = ['Contact Us', 'About Us', 'Terms Service', 'Privacy Policy', 'Get Started', 'Learn More', 'Read More', 'Click Here']
+        filtered_names = []
+        
+        for name in names:
+            if (name not in noise_words and 
+                len(name.split()) == 2 and 
+                all(len(part) > 1 for part in name.split()) and
+                not any(char.isdigit() for char in name)):
+                filtered_names.append(name)
 
         return list(set(filtered_names))[:5]
 
     def extract_address(self, text):
         """Extract address from text"""
         address_patterns = [
-            r'(?:Address|Location|Office)[:\s]+([^.!?\n]+(?:Street|Road|Avenue|Lane|Drive|Plaza|Building|Block)[^.!?\n]*)',
-            r'(\d+[^.!?\n]*(?:Street|Road|Avenue|Lane|Drive|Plaza|Building|Block)[^.!?\n]*)',
+            r'(?:Address|Location|Office|Headquarters)[:\s]+([^.!?\n]+(?:Street|Road|Avenue|Lane|Drive|Plaza|Building|Block|Floor)[^.!?\n]*)',
+            r'(\d+[^.!?\n]*(?:Street|Road|Avenue|Lane|Drive|Plaza|Building|Block|Floor)[^.!?\n]*)',
         ]
 
         for pattern in address_patterns:
             matches = re.findall(pattern, text, re.IGNORECASE)
             if matches:
-                return matches[0].strip()[:100]  # Limit length
+                address = matches[0].strip()
+                # Clean up the address
+                address = re.sub(r'\s+', ' ', address)
+                return address[:100]  # Limit length
 
         return ""
 
@@ -120,84 +143,166 @@ class GoogleEmployeeExtractor:
 
         # Look for specific employee counts
         employee_patterns = [
-            r'(\d+)[\s]*employees',
+            r'(\d+)[\s]*(?:employees|staff|people|team members)',
             r'team of (\d+)',
-            r'(\d+)[\s]*people',
-            r'workforce of (\d+)'
+            r'workforce of (\d+)',
+            r'(\d+)\+?\s*(?:employees|staff)'
         ]
 
         for pattern in employee_patterns:
             matches = re.findall(pattern, text_lower)
             if matches:
-                count = int(matches[0])
-                if count <= 10:
-                    return '1-10'
-                elif count <= 50:
-                    return '10-50'
-                elif count <= 200:
-                    return '50-200'
-                elif count <= 1000:
-                    return '200-1000'
-                else:
-                    return '1000+'
+                try:
+                    count = int(matches[0])
+                    if count <= 10:
+                        return '1-10'
+                    elif count <= 50:
+                        return '10-50'
+                    elif count <= 200:
+                        return '50-200'
+                    elif count <= 1000:
+                        return '200-1000'
+                    else:
+                        return '1000+'
+                except ValueError:
+                    continue
 
         # Default estimation based on keywords
-        if any(word in text_lower for word in ['startup', 'small team']):
+        if any(word in text_lower for word in ['startup', 'small team', 'boutique']):
             return '1-10'
-        elif any(word in text_lower for word in ['growing', 'medium']):
+        elif any(word in text_lower for word in ['growing', 'medium', 'mid-size']):
             return '50-200'
-        elif any(word in text_lower for word in ['enterprise', 'corporation']):
+        elif any(word in text_lower for word in ['enterprise', 'corporation', 'multinational', 'global']):
+            return '200-1000'
+        elif any(word in text_lower for word in ['large', 'major', 'leading']):
             return '200-1000'
 
         return "10-50"  # Default
 
-    def search_google_companies(self, industry, city, country, limit=10):
-        """Search for companies using Google Custom Search API"""
+    def search_duckduckgo(self, query, max_results=10):
+        """Search DuckDuckGo for companies"""
+        try:
+            search_url = f"https://duckduckgo.com/html/?q={quote(query)}"
+            
+            response = self.session.get(search_url, timeout=15)
+            if response.status_code != 200:
+                return []
 
-        # 🔑 Add your Google API Key and CSE ID here
-        api_key = "AIzaSyAzNcYVARWf_cXKbBLdroLfRlHTS7XX8BA"
-        cse_id = "d59b581ca6cbe4e5d"
+            soup = BeautifulSoup(response.content, 'html.parser')
+            results = []
 
+            # Find search result links
+            for link in soup.find_all('a', {'class': 'result__a'}):
+                try:
+                    url = link.get('href')
+                    title = link.get_text().strip()
+                    
+                    if url and title:
+                        # Skip social media and job sites
+                        skip_domains = ['linkedin.com', 'facebook.com', 'twitter.com', 'youtube.com', 
+                                      'indeed.com', 'naukri.com', 'glassdoor.com', 'monster.com']
+                        
+                        if not any(domain in url.lower() for domain in skip_domains):
+                            results.append({
+                                'name': title,
+                                'url': url,
+                                'source': 'DuckDuckGo'
+                            })
+                            
+                            if len(results) >= max_results:
+                                break
+                                
+                except Exception as e:
+                    continue
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Error searching DuckDuckGo: {e}")
+            return []
+
+    def search_bing(self, query, max_results=10):
+        """Search Bing for companies"""
+        try:
+            search_url = f"https://www.bing.com/search?q={quote(query)}"
+            
+            response = self.session.get(search_url, timeout=15)
+            if response.status_code != 200:
+                return []
+
+            soup = BeautifulSoup(response.content, 'html.parser')
+            results = []
+
+            # Find search result links
+            for link in soup.find_all('a'):
+                try:
+                    url = link.get('href')
+                    if not url or not url.startswith('http'):
+                        continue
+                        
+                    title = link.get_text().strip()
+                    
+                    if url and title and len(title) > 10:
+                        # Skip unwanted domains
+                        skip_domains = ['linkedin.com', 'facebook.com', 'twitter.com', 'youtube.com', 
+                                      'indeed.com', 'naukri.com', 'glassdoor.com', 'monster.com',
+                                      'bing.com', 'microsoft.com']
+                        
+                        if not any(domain in url.lower() for domain in skip_domains):
+                            results.append({
+                                'name': title,
+                                'url': url,
+                                'source': 'Bing'
+                            })
+                            
+                            if len(results) >= max_results:
+                                break
+                                
+                except Exception as e:
+                    continue
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Error searching Bing: {e}")
+            return []
+
+    def search_companies(self, industry, city, country, limit=15):
+        """Search for companies using multiple search engines"""
         search_queries = [
-            f"{industry} companies in {city} {country} contact email phone",
-            f"{industry} firms {city} {country} CTO CEO director",
-            f"list of {industry} companies {city} {country} management team",
-            f"{industry} businesses {city} {country} leadership contact"
+            f"{industry} companies in {city} {country}",
+            f"{industry} firms {city} {country} contact",
+            f"list of {industry} companies {city} {country}",
+            f"{industry} businesses {city} {country} directory",
+            f"top {industry} companies {city} {country}",
         ]
 
-        companies = []
+        all_companies = []
 
-        for query in search_queries:
+        for query in search_queries[:3]:  # Limit to 3 queries to avoid being blocked
             try:
-                url = f"https://www.googleapis.com/customsearch/v1?q={quote(query)}&key={api_key}&cx={cse_id}"
-                response = self.session.get(url, timeout=15)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    for item in data.get("items", [])[:5]:  # Top 5 per query
-                        link = item.get("link")
-                        title = item.get("title")
-
-                        if link and title and not any(skip in link.lower() for skip in
-                                                      ['linkedin.com', 'facebook.com', 'twitter.com', 'youtube.com']):
-                            companies.append({
-                                'name': title,
-                                'url': link,
-                                'source': 'Google CSE'
-                            })
-                else:
-                    logger.error(f"Google API error {response.status_code}: {response.text}")
-
-                time.sleep(1)  # rate limiting
-
+                # Try DuckDuckGo first
+                companies = self.search_duckduckgo(query, 5)
+                all_companies.extend(companies)
+                
+                time.sleep(2)  # Rate limiting
+                
+                # Try Bing as backup
+                if len(all_companies) < 5:
+                    bing_companies = self.search_bing(query, 5)
+                    all_companies.extend(bing_companies)
+                    
+                time.sleep(2)  # Rate limiting
+                
             except Exception as e:
-                logger.error(f"Error searching query '{query}': {e}")
+                logger.error(f"Error with query '{query}': {e}")
                 continue
 
-        # Deduplicate based on URL
+        # Remove duplicates based on URL
         unique_companies = []
         seen_urls = set()
-        for company in companies:
+        
+        for company in all_companies:
             if company['url'] not in seen_urls:
                 unique_companies.append(company)
                 seen_urls.add(company['url'])
@@ -207,11 +312,19 @@ class GoogleEmployeeExtractor:
     def scrape_company_website(self, company_url, company_name, job_role):
         """Scrape individual company website for employee information"""
         try:
+            # Add random delay to avoid being blocked
+            time.sleep(random.uniform(1, 3))
+            
             response = self.session.get(company_url, timeout=20)
             if response.status_code != 200:
                 return []
 
             soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Remove script and style elements
+            for script in soup(["script", "style"]):
+                script.decompose()
+                
             text_content = soup.get_text(separator=' ', strip=True)
 
             # Look for team/about/contact pages
@@ -221,29 +334,36 @@ class GoogleEmployeeExtractor:
                 link_text = link.get_text().lower()
 
                 if any(keyword in href or keyword in link_text for keyword in
-                       ['about', 'team', 'management', 'leadership', 'contact', 'executive', 'staff']):
+                       ['about', 'team', 'management', 'leadership', 'contact', 'executive', 'staff', 'founder']):
                     full_url = urljoin(company_url, link['href'])
-                    potential_pages.append(full_url)
+                    if full_url.startswith('http'):
+                        potential_pages.append(full_url)
 
             # Extract information from main page
             all_emails = self.extract_emails_from_text(text_content)
             all_phones = self.extract_phone_numbers(text_content)
             all_names = self.extract_names_from_text(text_content)
 
-            # Scrape key subpages
-            for page_url in potential_pages[:3]:  # Limit to 3 subpages
+            # Scrape key subpages (limit to 2 to avoid being blocked)
+            for page_url in potential_pages[:2]:
                 try:
+                    time.sleep(random.uniform(1, 2))
                     sub_response = self.session.get(page_url, timeout=15)
                     if sub_response.status_code == 200:
                         sub_soup = BeautifulSoup(sub_response.content, 'html.parser')
+                        
+                        # Remove script and style elements
+                        for script in sub_soup(["script", "style"]):
+                            script.decompose()
+                            
                         sub_text = sub_soup.get_text(separator=' ', strip=True)
 
                         all_emails.extend(self.extract_emails_from_text(sub_text))
                         all_phones.extend(self.extract_phone_numbers(sub_text))
                         all_names.extend(self.extract_names_from_text(sub_text))
 
-                    time.sleep(1)  # Rate limiting
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Error scraping subpage {page_url}: {e}")
                     continue
 
             # Remove duplicates
@@ -254,6 +374,9 @@ class GoogleEmployeeExtractor:
             # Create employee records
             employees = []
             domain = urlparse(company_url).netloc.replace('www.', '')
+
+            # Clean company name
+            clean_company_name = re.sub(r'[^\w\s-]', '', company_name).strip()[:50]
 
             # If we found names, create individual records
             if all_names:
@@ -274,7 +397,7 @@ class GoogleEmployeeExtractor:
                         other_email = other_emails[0] if other_emails else ""
 
                     employee_data = {
-                        'Business Name': company_name[:50],  # Limit length
+                        'Business Name': clean_company_name,
                         'Number of Employees': self.estimate_company_size(text_content),
                         'Contact Person': name,
                         'First Name': first_name,
@@ -291,9 +414,9 @@ class GoogleEmployeeExtractor:
                     employees.append(employee_data)
 
             # If no names found, create one record with available info
-            else:
+            if not employees and (all_emails or all_phones):
                 employee_data = {
-                    'Business Name': company_name[:50],
+                    'Business Name': clean_company_name,
                     'Number of Employees': self.estimate_company_size(text_content),
                     'Contact Person': "",
                     'First Name': "",
@@ -321,17 +444,19 @@ class GoogleEmployeeExtractor:
             logger.info(f"Starting extraction for {job_role} in {industry} companies in {city}, {country}")
 
             # Step 1: Search for companies
-            companies = self.search_google_companies(industry, city, country, limit * 2)
+            companies = self.search_companies(industry, city, country, limit * 2)
 
             if not companies:
+                logger.warning("No companies found in search results")
                 return []
 
             logger.info(f"Found {len(companies)} companies to scrape")
 
-            # Step 2: Scrape each company website
+            # Step 2: Scrape each company website with limited concurrency
             all_employees = []
 
-            with ThreadPoolExecutor(max_workers=3) as executor:
+            # Use ThreadPoolExecutor with limited workers to avoid being blocked
+            with ThreadPoolExecutor(max_workers=2) as executor:
                 future_to_company = {
                     executor.submit(self.scrape_company_website, company['url'], company['name'], job_role): company
                     for company in companies[:limit]
@@ -405,6 +530,10 @@ def main():
         border-radius: 10px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
+    .stAlert > div {
+        padding: 1rem;
+        border-radius: 8px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -412,7 +541,7 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>🔍 Employee Data Extractor</h1>
-        <p>Extract real employee data from Google search results</p>
+        <p>Extract real employee data from company websites using advanced web scraping</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -451,7 +580,7 @@ def main():
         )
 
     # Number of results
-    limit = st.slider("Number of Results", min_value=5, max_value=25, value=10)
+    limit = st.slider("Number of Results", min_value=5, max_value=20, value=10)
 
     # Extract button
     if st.button("🚀 Extract Employee Data", type="primary", use_container_width=True):
@@ -470,7 +599,7 @@ def main():
 
         try:
             # Initialize extractor
-            extractor = GoogleEmployeeExtractor()
+            extractor = EmployeeDataExtractor()
 
             status_text.text("🔍 Searching for companies...")
             progress_bar.progress(25)
@@ -569,18 +698,33 @@ def main():
 
             else:
                 status_text.warning("⚠️ No employee data found")
-                st.warning("No results found. Try:")
+                st.warning("No results found. This could be due to:")
                 st.markdown("""
-                - Using broader industry terms
-                - Searching in major cities
-                - Trying different job roles
-                - Increasing the number of results
+                - **Limited publicly available information** on company websites
+                - **Anti-scraping measures** by websites
+                - **Geographic location** having fewer companies with online presence
+                - **Industry-specific privacy practices**
+
+                **Try these suggestions:**
+                - Use broader industry terms (e.g., "Software" instead of "AI/ML")
+                - Search in major tech cities (Mumbai, Bangalore, Hyderabad)
+                - Try different job roles (CEO, Founder, Manager, Director)
+                - Increase the number of results
+                - Try different combinations of city/country
                 """)
 
         except Exception as e:
             progress_bar.progress(0)
             status_text.error(f"❌ Error: {str(e)}")
-            st.error("An error occurred during extraction. Please try again with different parameters.")
+            st.error("An error occurred during extraction. This might be due to:")
+            st.markdown("""
+            - **Network connectivity issues**
+            - **Websites blocking automated requests**
+            - **Rate limiting by search engines**
+            - **Temporary server issues**
+
+            Please try again in a few minutes with different parameters.
+            """)
 
         finally:
             progress_bar.empty()
@@ -591,20 +735,60 @@ def main():
     # Information section
     with st.expander("ℹ️ How it works"):
         st.markdown("""
-        **This tool extracts real employee data from Google search results:**
+        **This tool extracts real employee data using advanced web scraping:**
         
-        1. **Search**: Finds companies in your specified industry and location
-        2. **Scrape**: Extracts employee information from company websites
-        3. **Parse**: Identifies names, emails, phones, and addresses
-        4. **Filter**: Removes duplicates and validates data
-        5. **Export**: Provides results in CSV, Excel, and JSON formats
+        1. **🔍 Search**: Uses DuckDuckGo and Bing to find companies in your specified industry and location
+        2. **🌐 Scrape**: Extracts employee information from company websites, about pages, and team sections
+        3. **🧠 Parse**: Uses regex patterns and NLP to identify names, emails, phones, and addresses
+        4. **🔧 Filter**: Removes duplicates, validates data, and cleans results
+        5. **📊 Export**: Provides results in CSV, Excel, and JSON formats
         
         **Data Sources:**
         - Company websites and about pages
         - Team and leadership sections
         - Contact pages and directories
         - Publicly available business information
+        
+        **Features:**
+        - ✅ Multiple search engines for better coverage
+        - ✅ Smart rate limiting to avoid blocking
+        - ✅ Advanced text parsing and extraction
+        - ✅ Duplicate removal and data validation
+        - ✅ Export in multiple formats
         """)
+
+    with st.expander("⚖️ Legal & Ethical Considerations"):
+        st.markdown("""
+        **This tool follows ethical web scraping practices:**
+        
+        ✅ **What we do:**
+        - Only scrape publicly available information
+        - Implement rate limiting (2-3 seconds between requests)
+        - Use appropriate user agents and headers
+        - Handle errors gracefully without overwhelming servers
+        - Respect website structure and content
+        
+        ❌ **What we don't do:**
+        - Scrape password-protected or private content
+        - Bypass CAPTCHAs or security measures
+        - Overload servers with rapid requests
+        - Store personal data permanently
+        - Violate website terms of service
+        
+        **Legal Compliance:**
+        - All data extracted is publicly available
+        - Respects robots.txt guidelines where possible
+        - Follows data minimization principles
+        - Complies with applicable privacy laws
+        """)
+
+    st.markdown("---")
+    st.markdown(
+        "<div style='text-align: center; color: #666; padding: 1rem;'>"
+        "Employee Data Extractor | Advanced Web Scraping Tool | Use Responsibly"
+        "</div>",
+        unsafe_allow_html=True
+    )
 
 if __name__ == "__main__":
     main()
