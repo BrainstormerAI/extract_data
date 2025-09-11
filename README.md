@@ -1,43 +1,55 @@
-# Employee Data Extractor
+# Business Data Extractor
 
-A Streamlit application that extracts real employee data from Google search results based on industry, job role, city, and country parameters.
+A Streamlit web application that extracts publicly available company details using the Serper.dev Google Search API and web scraping.
 
 ## Features
 
-- **Real-time Data Extraction**: Scrapes live data from Google search results
-- **Comprehensive Search**: Finds companies based on industry and location
-- **Employee Information**: Extracts names, emails, phones, and addresses
-- **Multiple Export Formats**: Download results as CSV, Excel, or JSON
-- **Clean Interface**: Simple and intuitive Streamlit UI
-- **Duplicate Removal**: Automatically filters out duplicate entries
+- **Search Companies**: Uses Serper.dev API to find companies based on industry, job role, and location
+- **Data Extraction**: Scrapes company websites for contact information, emails, and phone numbers
+- **Structured Output**: Displays data in a clean table format
+- **Export Options**: Download results as Excel or CSV files
+- **Email Validation**: Prioritizes corporate domain emails over generic ones
+- **Phone Normalization**: Formats phone numbers to international standards
 
 ## Installation
 
-1. Install Python 3.8 or higher
-2. Install required dependencies:
+1. Clone this repository
+2. Create a virtual environment (recommended):
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+3. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
+4. Set up environment variables:
+   ```bash
+   cp .env.example .env
+   ```
+   Then edit `.env` file and add your Serper.dev API key.
 
 ## Usage
 
-1. Run the application:
-   ```bash
-   streamlit run streamlit_app.py
+1. **Get API Key**: Sign up at [Serper.dev](https://serper.dev) and get your API key
+2. **Configure Environment**: Add your API key to the `.env` file:
    ```
+   SERPER_API_KEY=your_actual_api_key_here
+   ```
+3. **Run the application**:
+   ```bash
+   streamlit run app.py
+   ```
+4. Fill in the search parameters (Industry, Job Role, City, Country)
+5. Click "Extract Data" to start the extraction process
+6. Download the results as Excel or CSV
 
-2. Open your browser and navigate to the provided URL (usually `http://localhost:8501`)
+## Environment Variables
 
-3. Fill in the search parameters:
-   - **Industry**: e.g., Technology, Healthcare, Finance
-   - **Job Role**: e.g., CTO, CEO, Manager, Director
-   - **City**: e.g., Delhi, Mumbai, Bangalore
-   - **Country**: e.g., India, USA, UK
+The application uses a `.env` file to store sensitive configuration:
+- `SERPER_API_KEY`: Your Serper.dev API key
 
-4. Click "Extract Employee Data" to start the extraction
-
-5. View results in the data table and download in your preferred format
-
+**Security Note**: Never commit your `.env` file to version control. The `.env.example` file is provided as a template.
 ## Data Fields Extracted
 
 - Business Name
@@ -45,7 +57,7 @@ A Streamlit application that extracts real employee data from Google search resu
 - Contact Person
 - First Name
 - Corporate Email
-- Email
+- Other Emails
 - Website
 - Phone
 - Phone Type
@@ -54,36 +66,6 @@ A Streamlit application that extracts real employee data from Google search resu
 - State
 - City
 
-## How It Works
+## Legal Notice
 
-1. **Company Search**: Uses Google/DuckDuckGo to find companies matching your criteria
-2. **Website Scraping**: Extracts information from company websites, about pages, and team sections
-3. **Data Parsing**: Uses regex patterns to identify employee names, emails, and contact information
-4. **Data Validation**: Filters out noise and validates extracted information
-5. **Duplicate Removal**: Ensures unique results based on company and contact person
-
-## Legal & Ethical Considerations
-
-- Only extracts publicly available information
-- Implements rate limiting to respect website servers
-- Follows ethical web scraping practices
-- Complies with robots.txt guidelines
-- Use responsibly and in accordance with local laws
-
-## Technical Features
-
-- Multi-threaded scraping for faster results
-- Error handling and retry mechanisms
-- Clean data validation and filtering
-- Responsive Streamlit interface
-- Export capabilities in multiple formats
-
-## Requirements
-
-- Python 3.8+
-- Internet connection for web scraping
-- All dependencies listed in requirements.txt
-
-## License
-
-This project is for educational and demonstration purposes. Please ensure compliance with all applicable laws and terms of service when using for commercial purposes.
+This tool only extracts publicly available information and respects robots.txt guidelines. Use responsibly and in accordance with applicable laws and website terms of service.
